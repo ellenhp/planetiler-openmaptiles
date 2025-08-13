@@ -35,6 +35,7 @@ See https://github.com/openmaptiles/openmaptiles/blob/master/LICENSE.md for deta
 */
 package org.openmaptiles.layers;
 
+import static com.onthegomap.planetiler.util.MemoryEstimator.CLASS_HEADER_BYTES;
 import static java.util.Map.entry;
 import static org.openmaptiles.util.Utils.coalesce;
 import static org.openmaptiles.util.Utils.nullIfEmpty;
@@ -51,7 +52,11 @@ import com.onthegomap.planetiler.expression.MultiExpression;
 import com.onthegomap.planetiler.geo.GeoUtils;
 import com.onthegomap.planetiler.geo.GeometryException;
 import com.onthegomap.planetiler.reader.SimpleFeature;
+import com.onthegomap.planetiler.reader.osm.OsmElement;
+import com.onthegomap.planetiler.reader.osm.OsmReader;
+import com.onthegomap.planetiler.reader.osm.OsmRelationInfo;
 import com.onthegomap.planetiler.stats.Stats;
+import com.onthegomap.planetiler.util.MemoryEstimator;
 import com.onthegomap.planetiler.util.Parse;
 import com.onthegomap.planetiler.util.Translations;
 import java.util.ArrayList;
@@ -59,6 +64,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
 import org.locationtech.jts.geom.Point;
@@ -81,6 +87,7 @@ public class Poi implements
   Tables.OsmPoiPoint.Handler,
   Tables.OsmPoiPolygon.Handler,
   ForwardingProfile.LayerPostProcessor,
+  ForwardingProfile.OsmRelationPreprocessor,
   ForwardingProfile.FinishHandler {
 
   /*
@@ -160,6 +167,18 @@ public class Poi implements
   @Override
   public void release() {
     aggStops.clear();
+  }
+
+  @Override
+  public List<OsmRelationInfo> preprocessOsmRelation(OsmElement.Relation relation) {
+    if (relation.hasTag("type", "associatedStreet") || relation.hasTag("type", "street")) {
+      String name = relation.getString("name");
+      if (name == null || name.isBlank()) {
+        return null;
+      }
+      return List.of(new PoiRelationInfo(relation.id(), name));
+    }
+    return null;
   }
 
   @Override
@@ -272,6 +291,19 @@ public class Poi implements
       rawSubclass = "halt";
     }
 
+    String street = element.source().hasTag("addr:street") ? element.source().getTag("addr:street").toString() : null;
+    List<OsmReader.RelationMember<PoiRelationInfo>> relationInfo = element.source().relationInfo(
+        PoiRelationInfo.class);
+    if (street == null || street.isBlank()) {
+      for (OsmReader.RelationMember<PoiRelationInfo> relation : relationInfo) {
+        String associatedStreet = relation.relation().street();
+        if (associatedStreet != null && !associatedStreet.isBlank()) {
+          street = associatedStreet;
+          break;
+        }
+      }
+    }
+
     // ATM names fall back to operator, or else network
     String name = element.name();
     var tags = element.source().tags();
@@ -311,17 +343,41 @@ public class Poi implements
       minzoom = 10;
     }
 
-    output.setBufferPixels(BUFFER_SIZE)
+    final String streetTag = "addr_street";
+    final String addressPrefix = "addr:";
+    FeatureCollector.Feature feature = output.setBufferPixels(BUFFER_SIZE)
       .setAttr(Fields.CLASS, poiClass)
       .setAttr(Fields.SUBCLASS, subclass)
       .setAttr(Fields.LAYER, nullIfLong(element.layer(), 0))
       .setAttr(Fields.LEVEL, Parse.parseLongOrNull(element.source().getTag("level")))
       .setAttr(Fields.INDOOR, element.indoor() ? 1 : null)
       .setAttr(Fields.AGG_STOP, aggStop)
+      .setAttrWithMinzoom(streetTag, street, 14) // Special-case for associated streets.
       .putAttrs(OmtLanguageUtils.getNames(element.source().tags(), translations))
       .setPointLabelGridPixelSize(14, 64)
       .setSortKey(rankOrder)
       .setMinZoom(minzoom);
+
+    for (String key : element.source().tags().keySet()) {
+      if (key.startsWith(addressPrefix) && !key.equals(streetTag)) {
+        feature.setAttrWithMinzoom(key.replace(':', '_'), element.source().getTag(key), 14);
+      }
+    }
+
+    final List<String> includedTags = List.of("amenity", "shop", "emergency", "craft", "healthcare", "office", "tourism", "natural", "cuisine", "phone", "website", "wikidata", "brand", "building", "wheelchair", "elevator", "opening_hours", "access");
+    final List<String> includedTagPrefixes = List.of("diet:", "brand:", "toilets:");
+    for (String key : includedTags) {
+      feature.setAttrWithMinzoom(key, element.source().getTag(key), 14);
+    }
+    for (String key : element.source().tags().keySet()) {
+      for (String keyPrefix : includedTagPrefixes) {
+        if (key.startsWith(keyPrefix) && !key.equals(streetTag)) {
+          key = key.replace(':', '_');
+          feature.setAttrWithMinzoom(key, element.source().getTag(key), 14);
+          break;
+        }
+      }
+    }
   }
 
   @Override
@@ -336,5 +392,13 @@ public class Poi implements
       }
     }
     return items;
+  }
+
+  private record PoiRelationInfo(long id, String street) implements OsmRelationInfo {
+
+    @Override
+    public long estimateMemoryUsageBytes() {
+      return CLASS_HEADER_BYTES + MemoryEstimator.estimateSizeLong(id);
+    }
   }
 }

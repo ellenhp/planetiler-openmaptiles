@@ -35,13 +35,19 @@ See https://github.com/openmaptiles/openmaptiles/blob/master/LICENSE.md for deta
 */
 package org.openmaptiles.layers;
 
+import static com.onthegomap.planetiler.util.MemoryEstimator.CLASS_HEADER_BYTES;
+
 import com.onthegomap.planetiler.FeatureCollector;
 import com.onthegomap.planetiler.FeatureMerge;
 import com.onthegomap.planetiler.ForwardingProfile;
 import com.onthegomap.planetiler.VectorTile;
 import com.onthegomap.planetiler.config.PlanetilerConfig;
 import com.onthegomap.planetiler.geo.GeometryException;
+import com.onthegomap.planetiler.reader.osm.OsmElement;
+import com.onthegomap.planetiler.reader.osm.OsmReader;
+import com.onthegomap.planetiler.reader.osm.OsmRelationInfo;
 import com.onthegomap.planetiler.stats.Stats;
+import com.onthegomap.planetiler.util.MemoryEstimator;
 import com.onthegomap.planetiler.util.Translations;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -66,7 +72,8 @@ import org.slf4j.LoggerFactory;
 public class Housenumber implements
   OpenMapTilesSchema.Housenumber,
   Tables.OsmHousenumberPoint.Handler,
-  ForwardingProfile.LayerPostProcessor {
+  ForwardingProfile.LayerPostProcessor,
+  ForwardingProfile.OsmRelationPreprocessor {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(Housenumber.class);
   private static final String OSM_SEPARATOR = ";";
@@ -116,8 +123,31 @@ public class Housenumber implements
   }
 
   @Override
+  public List<OsmRelationInfo> preprocessOsmRelation(OsmElement.Relation relation) {
+    if (relation.hasTag("type", "associatedStreet") || relation.hasTag("type", "street")) {
+      String name = relation.getString("name");
+      if (name == null || name.isBlank()) {
+        return null;
+      }
+      return List.of(new HouseNumberRelationInfo(relation.id(), name));
+    }
+    return null;
+  }
+
+  @Override
   public void process(Tables.OsmHousenumberPoint element, FeatureCollector features) {
     String housenumber;
+    String street = element.street();
+    List<OsmReader.RelationMember<HouseNumberRelationInfo>> relationInfo = element.source().relationInfo(HouseNumberRelationInfo.class);
+    if (street == null || street.isBlank()) {
+      for (OsmReader.RelationMember<HouseNumberRelationInfo> relation : relationInfo) {
+        String associatedStreet = relation.relation().street();
+        if (associatedStreet != null && !associatedStreet.isBlank()) {
+          street = associatedStreet;
+          break;
+        }
+      }
+    }
     try {
       housenumber = displayHousenumber(element.housenumber());
     } catch (NumberFormatException e) {
@@ -127,17 +157,26 @@ public class Housenumber implements
       housenumber = element.housenumber();
     }
 
-    String partition = Utils.coalesce(element.street(), "")
+    String partition = Utils.coalesce(street, "")
       .concat(Utils.coalesce(element.blockNumber(), ""))
       .concat(housenumber);
     Boolean hasName = element.hasName() == null ? Boolean.FALSE : !element.hasName().isEmpty();
 
-    features.centroidIfConvex(LAYER_NAME)
+    final String streetTag = "addr_street";
+    final String addressPrefix = "addr:";
+    FeatureCollector.Feature feature = features.centroidIfConvex(LAYER_NAME)
       .setBufferPixels(BUFFER_SIZE)
       .setAttr(Fields.HOUSENUMBER, housenumber)
+      .setAttr(streetTag, street) // Special-case associated streets.
       .setAttr(TEMP_PARTITION, partition)
-      .setAttr(TEMP_HAS_NAME, hasName)
-      .setMinZoom(14);
+      .setAttr(TEMP_HAS_NAME, hasName);
+    for (String key : element.source().tags().keySet()) {
+      if (key.startsWith(addressPrefix) && !key.equals(streetTag)) {
+        feature.setAttr(key.replace(':', '_'), element.source().getTag(key));
+      }
+    }
+    feature.setMinZoom(14);
+
   }
 
   @Override
@@ -159,5 +198,13 @@ public class Housenumber implements
 
     // reduces the size of some heavy z14 tiles with many repeated housenumber values by 60% or more
     return FeatureMerge.mergeMultiPoint(items);
+  }
+
+  private record HouseNumberRelationInfo(long id, String street) implements OsmRelationInfo {
+
+    @Override
+    public long estimateMemoryUsageBytes() {
+      return CLASS_HEADER_BYTES + MemoryEstimator.estimateSizeLong(id);
+    }
   }
 }

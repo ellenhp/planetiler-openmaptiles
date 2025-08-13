@@ -515,6 +515,7 @@ public class Transportation implements
         .setAttrWithMinzoom(Fields.SERVICE, service, 12)
         .setAttrWithMinzoom(Fields.ONEWAY, nullIfInt(element.isOneway(), 0), 12)
         .setAttrWithMinzoom(Fields.SURFACE, surface(coalesce(element.surface(), element.tracktype())), 12)
+        .setAttrWithMinzoom("way_id", element.source().id(), 14)
         .setMinPixelSize(0) // merge during post-processing, then limit by size
         .setSortKey(element.zOrder())
         .setMinZoom(minzoom);
