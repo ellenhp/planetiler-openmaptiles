@@ -352,7 +352,7 @@ public class Poi implements
       .setAttr(Fields.LEVEL, Parse.parseLongOrNull(element.source().getTag("level")))
       .setAttr(Fields.INDOOR, element.indoor() ? 1 : null)
       .setAttr(Fields.AGG_STOP, aggStop)
-      .setAttrWithMinzoom(streetTag, street, 14) // Special-case for associated streets.
+      .setAttr(streetTag, street) // Special-case for associated streets.
       .putAttrs(OmtLanguageUtils.getNames(element.source().tags(), translations))
       .setPointLabelGridPixelSize(14, 64)
       .setSortKey(rankOrder)
@@ -360,20 +360,20 @@ public class Poi implements
 
     for (String key : element.source().tags().keySet()) {
       if (key.startsWith(addressPrefix) && !key.equals(streetTag)) {
-        feature.setAttrWithMinzoom(key.replace(':', '_'), element.source().getTag(key), 14);
+        feature.setAttr(key.replace(':', '_'), element.source().getTag(key));
       }
     }
 
     final List<String> includedTags = List.of("amenity", "shop", "emergency", "craft", "healthcare", "office", "tourism", "natural", "cuisine", "phone", "website", "wikidata", "brand", "building", "wheelchair", "elevator", "opening_hours", "access");
     final List<String> includedTagPrefixes = List.of("diet:", "brand:", "toilets:");
     for (String key : includedTags) {
-      feature.setAttrWithMinzoom(key, element.source().getTag(key), 14);
+      feature.setAttr(key, element.source().getTag(key));
     }
     for (String key : element.source().tags().keySet()) {
       for (String keyPrefix : includedTagPrefixes) {
         if (key.startsWith(keyPrefix) && !key.equals(streetTag)) {
           key = key.replace(':', '_');
-          feature.setAttrWithMinzoom(key, element.source().getTag(key), 14);
+          feature.setAttr(key, element.source().getTag(key));
           break;
         }
       }
